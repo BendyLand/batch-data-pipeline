@@ -1,6 +1,4 @@
-import pandas as pd
 import duckdb as ddb
-import numpy as np
 
 
 def save_customer_anomalies(con):

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd ../generator
+cd ../../generator
 
 if [[ -n $1 ]]; then
   ./generator $1 &
@@ -9,7 +9,7 @@ else
 fi
 RUST_PS=$!
 
-cd ../processor
+cd ../processor/scripts
 
 echo "Generating data..."
 wait "$RUST_PS"

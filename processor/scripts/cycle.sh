@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source env/bin/activate
+source ./toggle_env.sh
 
 START_TIME=$(date +%s)
 
@@ -22,6 +22,7 @@ while true; do
     ./gen_data.sh
   fi
 
+  cd ..
   if [[ -f "data.parquet" ]]; then
     echo "Ingesting data..."
     python3 ingest.py
@@ -35,10 +36,12 @@ while true; do
   else
     echo "No data.parquet found. Skipping..."
   fi
+  cd scripts
 
   ((COUNT++))
 done
 
+cd ..
 echo ""
 echo "Processing data..."
 python3 process.py
@@ -61,8 +64,11 @@ echo ""
 echo "Finished $COUNT iteration(s) for $ENTRIES_PER_ITER entries each in $TIME_MSG."
 echo ""
 
+cd scripts
+source ./toggle_env.sh
+
+cd ..
 echo "Running sample queries..."
 duckdb orders.duckdb < sample.sql
-
-source ~/.bashrc
+cd scripts
 
