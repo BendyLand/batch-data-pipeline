@@ -24,7 +24,7 @@ pub fn orders_to_chunk(orders: &[Order]) -> Chunk<Arc<dyn Array>> {
     let date_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.date.to_rfc3339()).collect::<Vec<_>>());
     let status_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| format!("{:?}", o.status)).collect::<Vec<_>>());
 
-    Chunk::new(vec![
+    return Chunk::new(vec![
         Arc::new(id_array),
         customer_array,
         product_array,
@@ -34,19 +34,22 @@ pub fn orders_to_chunk(orders: &[Order]) -> Chunk<Arc<dyn Array>> {
         Arc::new(total_array),
         Arc::new(date_array),
         Arc::new(status_array),
-    ])
+    ]);
 }
 
 pub fn get_payment_array(orders: &[Order]) -> Arc<dyn Array> {
     let transaction_id_array = Utf8Array::<i32>::from_slice(
-        orders.iter().map(|o| o.payment.transaction_id.as_str()).collect::<Vec<_>>(),
+        orders
+            .iter()
+            .map(|o| o.payment.transaction_id.as_str())
+            .collect::<Vec<_>>()
     );
 
     let expiration_array = Utf8Array::<i32>::from_slice(
         orders
             .iter()
             .map(|o| o.payment.details.expiration_date().to_string())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
     );
 
     let struct_array = StructArray::new(
@@ -60,27 +63,22 @@ pub fn get_payment_array(orders: &[Order]) -> Arc<dyn Array> {
         ],
         None,
     );
-
-    Arc::new(struct_array)
+    return Arc::new(struct_array);
 }
 
 pub fn get_product_array(orders: &[Order]) -> Arc<dyn Array> {
     let product_id_array = Int64Array::from_slice(
         orders.iter().map(|o| o.product.id).collect::<Vec<_>>(),
     );
-
     let product_name_array = Utf8Array::<i32>::from_slice(
         orders.iter().map(|o| o.product.name.as_str()).collect::<Vec<_>>(),
     );
-
     let product_category_array = Utf8Array::<i32>::from_slice(
         orders.iter().map(|o| format!("{}", o.product.category)).collect::<Vec<_>>(),
     );
-
     let product_price_array = Float64Array::from_iter(
         orders.iter().map(|o| Some(o.product.price)),
     );
-
     let struct_array = StructArray::new(
         DataType::Struct(vec![
             Field::new("id", DataType::Int64, false),
@@ -96,18 +94,35 @@ pub fn get_product_array(orders: &[Order]) -> Arc<dyn Array> {
         ],
         None,
     );
-
-    Arc::new(struct_array)
+    return Arc::new(struct_array);
 }
 
-
-
 pub fn get_customer_array(orders: &[Order]) -> Arc<dyn Array> {
-    let customer_id_array = Int64Array::from_slice(orders.iter().map(|o| o.customer.id).collect::<Vec<_>>());
-    let customer_name_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.customer.name.as_str()).collect::<Vec<_>>());
-    let customer_email_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.customer.email.as_str()).collect::<Vec<_>>());
-    let customer_address_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.customer.address.as_str()).collect::<Vec<_>>());
-    let customer_status_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| format!("{:?}", o.customer.status)).collect::<Vec<_>>());
+    let customer_id_array = {
+        Int64Array::from_slice(
+            orders.iter().map(|o| o.customer.id).collect::<Vec<_>>()
+        )
+    };
+    let customer_name_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.name.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_email_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.email.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_address_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.address.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_status_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| format!("{:?}", o.customer.status)).collect::<Vec<_>>()
+        )
+    };
     let customer_array = StructArray::new(
         DataType::Struct(vec![
             Field::new("id", DataType::Int64, false),
@@ -125,11 +140,11 @@ pub fn get_customer_array(orders: &[Order]) -> Arc<dyn Array> {
         ],
         None,
     );
-    Arc::new(customer_array)
+    return Arc::new(customer_array);
 }
 
 pub fn get_order_schema() -> Schema {
-    Schema::from(vec![
+    return Schema::from(vec![
         Field::new("id", DataType::Utf8, false),
         Field::new("customer", DataType::Struct(vec![
             Field::new("id", DataType::Int64, false),
@@ -153,47 +168,41 @@ pub fn get_order_schema() -> Schema {
         Field::new("total", DataType::Float64, false),
         Field::new("date", DataType::Utf8, false),
         Field::new("status", DataType::Utf8, false),
-    ])
+    ]);
 }
 
 pub fn write_parquet(orders: &[Order], output_path: &str) -> arrow2::error::Result<()> {
     let schema = get_order_schema();
     let chunk = orders_to_chunk(orders);
-
     let options = WriteOptions {
         write_statistics: true,
         compression: CompressionOptions::Zstd(Some(ZstdLevel::try_new(3).unwrap())),
         version: Version::V2,
         data_pagesize_limit: None,
     };
-
-    let encodings: Vec<Vec<Encoding>> = schema
-        .fields
-        .iter()
-        .map(|field| {
-            let parquet_type = to_parquet_type(field).unwrap();
-            let leaf_count = to_parquet_leaves(parquet_type).len();
-            vec![Encoding::Plain; leaf_count]
-        })
-        .collect();
-
-
+    let encodings: Vec<Vec<Encoding>> = {
+        schema
+            .fields
+            .iter()
+            .map(|field| {
+                let parquet_type = to_parquet_type(field).unwrap();
+                let leaf_count = to_parquet_leaves(parquet_type).len();
+                vec![Encoding::Plain; leaf_count]
+            })
+            .collect()
+    };
     let mut row_groups = RowGroupIterator::try_new(
         std::iter::once(Ok(chunk)),
         &schema,
         options,
         encodings,
     )?;
-
     let file = File::create(output_path)?;
     let mut writer = FileWriter::try_new(BufWriter::new(file), schema, options)?;
-
     for group in &mut row_groups {
         writer.write(group?)?;
     }
-
     writer.end(None)?;
-    Ok(())
+    return Ok(());
 }
-
 

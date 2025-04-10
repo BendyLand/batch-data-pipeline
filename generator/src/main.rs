@@ -23,10 +23,12 @@ fn main() {
 
     // ----------------------- Generate in parallel -----------------------
     println!("Generating {num_orders} orders...");
-    let orders: Vec<orders::Order> = (0..num_orders)
-	    .into_par_iter()
-	    .map(|_| generate_order())
-	    .collect();
+    let orders: Vec<orders::Order> = {
+        (0..num_orders)
+    	    .into_par_iter()
+    	    .map(|_| generate_order())
+    	    .collect()
+	};
 
     // ----------------------- Write to file -----------------------
     let path = "../processor/data.parquet";
@@ -34,7 +36,7 @@ fn main() {
 	    eprintln!("Failed to write Parquet file: {err}");
 	}
 	else {
-		println!("Data generated successfully!")
+		return println!("Data generated successfully!");
 	}
 }
 

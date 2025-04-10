@@ -25,7 +25,7 @@ impl fmt::Display for OrderStatus {
             OrderStatus::Refunded => "Refunded",
             OrderStatus::Cancelled => "Cancelled",
         };
-        write!(f, "{}", s)
+        return write!(f, "{}", s);
     }
 }
 
@@ -48,42 +48,29 @@ fn get_status(id: &str, payment: &Payment, date: DateTime<Utc>) -> OrderStatus {
     if id.len() != 36 {
         return OrderStatus::Cancelled;
     }
-
     let now = Utc::now();
     if now.date_naive() > payment.details.expiration_date() {
         return OrderStatus::Cancelled;
     }
-
     let month_ago = now - chrono::Duration::days(30);
     let week_ago = now - chrono::Duration::days(7);
-
-    if date < month_ago {
-        OrderStatus::Completed
-    } 
-    else if date > month_ago && date < week_ago {
-        OrderStatus::Refunded
-    } 
-    else if date > week_ago && date <= now {
-        OrderStatus::Completed
-    } 
-    else if date > now {
-        OrderStatus::Pending
-    } 
-    else {
-        OrderStatus::Completed
-    }
+    if date < month_ago { OrderStatus::Completed } 
+    else if date > month_ago && date < week_ago { OrderStatus::Refunded } 
+    else if date > week_ago && date <= now { OrderStatus::Completed } 
+    else if date > now { OrderStatus::Pending } 
+    else { OrderStatus::Completed }
 }
 
 fn get_quantity() -> u32 {
     let mut rng = rand::rng();
-    let temp = rng.random_range(0..3) + rng.random_range(0..2)
-        - rng.random_range(0..4) + rng.random_range(0..1);
-    if temp > 0 {
-        temp as u32
-    } 
-    else {
-        rng.random_range(1..=1)
-    }
+    let temp = {
+        rng.random_range(0..3) + 
+        rng.random_range(0..2) - 
+        rng.random_range(0..4) + 
+        rng.random_range(0..1)
+    };
+    if temp > 0 { temp as u32 } 
+    else { rng.random_range(1..=2) }
 }
 
 fn get_discount(customer: &Customer) -> f64 {
@@ -91,12 +78,8 @@ fn get_discount(customer: &Customer) -> f64 {
     match customer.status {
         CustomerStatus::NewCustomer => 0.05,
         CustomerStatus::ReturningCustomer => {
-            if rng.random_range(0..6) % 2 != 0 {
-                0.03
-            } 
-            else {
-                0.0
-            }
+            if rng.random_range(0..6) % 2 != 0 { return 0.03; } 
+            else { return 0.0; }
         }
         CustomerStatus::RewardsMember => 0.10,
         CustomerStatus::Employee => 0.20,
@@ -119,11 +102,9 @@ pub fn generate_order() -> Order {
     let product = products::generate_product();
     let customer = customers::generate_customer();
     let payment = payments::new_payment(&customer.name);
-
     if rand::rng().random_range(0..1000) % 13 == 0 {
         id.push('0'); // corrupt it slightly
     }
-
     let mut order = Order {
         id: id.clone(),
         date,
@@ -135,14 +116,10 @@ pub fn generate_order() -> Order {
         quantity: get_quantity(),
         total: 0.0,
     };
-
     order.discount = get_discount(&order.customer);
     compute_total(&mut order);
-
-    order
+    return order;
 }
-
-// Optional: for debugging or CLI demo
 
 #[allow(dead_code)]
 pub fn show(order: &Order) {
@@ -181,3 +158,4 @@ pub fn show(order: &Order) {
     println!("end~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~end");
     thread::sleep(Duration::from_millis(10));
 }
+

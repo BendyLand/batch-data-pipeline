@@ -71,11 +71,11 @@ func getStatus(id string, payment payments.Payment, date time.Time) OrderStatus 
 }
 
 func getQuantity() int {
-	temp := rand.Intn(3) + rand.Intn(2) - rand.Intn(4) + rand.Intn(1)
+	temp := rand.Intn(3) + rand.Intn(2) - rand.Intn(4) + rand.Intn(2)
 	if temp > 0 {
 		return temp
 	} else {
-		return rand.Intn(1) + 1
+		return rand.Intn(2) + 1
 	}
 }
 

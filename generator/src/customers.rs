@@ -23,13 +23,13 @@ pub struct Customer {
 
 pub fn generate_customer() -> Customer {
     let name = get_name();
-    Customer {
+    return Customer {
         id: get_customer_id(&name),
         name: name.clone(),
         email: get_email(&name),
         address: get_address(&name),
         status: get_status(&name),
-    }
+    };
 }
 
 // ------------------------ Data + Logic ------------------------
@@ -43,34 +43,63 @@ fn get_name() -> String {
         // 20% chance to shift index
         choice = choice.saturating_sub(rng.random_range(0..10));
     }
-    names[choice].to_string()
+    return names[choice].to_string();
 }
 
 fn get_customer_id(name: &str) -> i64 {
-    CUSTOMER_IDS.iter().find(|(n, _)| *n == name).map(|(_, id)| *id).unwrap_or(-1)
+    return {
+        CUSTOMER_IDS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, id)| *id).unwrap_or(-1)
+    };
 }
 
 fn get_email(name: &str) -> String {
-    CUSTOMER_EMAILS.iter().find(|(n, _)| *n == name).unwrap().1.to_string()
+    return {
+        CUSTOMER_EMAILS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .to_string()
+    };
 }
 
 fn get_address(name: &str) -> String {
-    CUSTOMER_ADDRESSES.iter().find(|(n, _)| *n == name).unwrap().1.to_string()
+    return {
+        CUSTOMER_ADDRESSES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .to_string()
+    };
 }
 
 fn get_status(name: &str) -> CustomerStatus {
-    match name {
-        "Caleb Winslow" | "Lily Hargrove" | "Milo Carrington" |
-        "Aria Templeton" | "Declan Shore" => CustomerStatus::Employee,
-        "Vivian Leclair" | "Grayson Holt" => CustomerStatus::Manager,
-        "Clara Redmond" => CustomerStatus::Owner,
-        "Sebastian Knox" | "Amelia Fairbanks" | "Julian Royce" |
-        "Nora Halston" | "Elijah Trent" | "Zoe Merrick" => CustomerStatus::RewardsMember,
+    return match name {
         "Maya Ellison" | "Noah Blackwood" | "Chloe Hartman" |
         "Lucas Pennington" | "Sofia Langford" | "Oliver Drayton" |
-        "Harper Linwood" => CustomerStatus::ReturningCustomer,
-        _ => CustomerStatus::NewCustomer,
-    }
+        "Harper Linwood" => {
+            CustomerStatus::ReturningCustomer
+        },
+        "Sebastian Knox" | "Amelia Fairbanks" | "Julian Royce" |
+        "Nora Halston" | "Elijah Trent" | "Zoe Merrick" => {
+            CustomerStatus::RewardsMember
+        },
+        "Caleb Winslow" | "Lily Hargrove" | "Milo Carrington" |
+        "Aria Templeton" | "Declan Shore" => {
+            CustomerStatus::Employee
+        },
+        "Vivian Leclair" | "Grayson Holt" => {
+            CustomerStatus::Manager
+        },
+        "Clara Redmond" => {
+            CustomerStatus::Owner
+        },
+        _ =>CustomerStatus::NewCustomer,
+    };
 }
 
 // ------------------------ Static Data ------------------------
@@ -150,3 +179,4 @@ const CUSTOMER_ADDRESSES: [(&str, &str); 25] = [
     ("Grayson Holt", "214 Forest Glen Ct, Garner, NC 27529"),
     ("Clara Redmond", "1201 Amberwood Dr, Holly Springs, NC 27540"),
 ];
+

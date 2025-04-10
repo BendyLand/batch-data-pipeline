@@ -43,7 +43,7 @@ impl std::fmt::Display for ProductCategory {
             ProductCategory::OutdoorEquipment => "Outdoor Equipment",
             ProductCategory::Automotive => "Automotive",
         };
-        write!(f, "{}", name)
+        return write!(f, "{}", name);
     }
 }
 
@@ -57,20 +57,20 @@ pub struct Product {
 
 pub fn generate_product() -> Product {
     let id = rand::rng().random_range(0..50);
-    Product {
+    return Product {
         id,
         name: get_name(id),
         category: get_category(id),
         price: round_decimal(get_price(id)),
-    }
+    };
 }
 
 fn get_name(id: i64) -> String {
-    PRODUCT_IDS[id as usize].to_string()
+    return PRODUCT_IDS[id as usize].to_string();
 }
 
 fn get_category(id: i64) -> ProductCategory {
-    match id {
+    return match id {
         0..=3 => ProductCategory::Grocery,
         4..=7 => ProductCategory::HealthAndWellness,
         8..=10 => ProductCategory::CleaningSupplies,
@@ -88,11 +88,11 @@ fn get_category(id: i64) -> ProductCategory {
         44..=46 => ProductCategory::OutdoorEquipment,
         47..=49 => ProductCategory::Automotive,
         _ => panic!("Invalid product ID"),
-    }
+    };
 }
 
 fn get_price(id: i64) -> f64 {
-    PRODUCT_PRICES[id as usize]
+    return PRODUCT_PRICES[id as usize];
 }
 
 const PRODUCT_IDS: [&str; 50] = [
