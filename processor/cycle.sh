@@ -1,8 +1,10 @@
 #!/bin/bash
 
+source env/bin/activate
+
 START_TIME=$(date +%s)
 
-ITERATIONS=${1:-0} # Defaults to infinite loop unless you specify a count
+ITERATIONS=${1:-5} # Defaults to 5 if not specified
 COUNT=0
 
 while true; do
@@ -37,6 +39,7 @@ while true; do
   ((COUNT++))
 done
 
+echo ""
 echo "Processing data..."
 python3 process.py
 
@@ -56,4 +59,10 @@ ENTRIES_PER_ITER=${2:-2000000}
 
 echo ""
 echo "Finished $COUNT iteration(s) for $ENTRIES_PER_ITER entries each in $TIME_MSG."
+echo ""
+
+echo "Running sample queries..."
+duckdb orders.duckdb < sample.sql
+
+source ~/.bashrc
 
