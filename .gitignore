@@ -1,0 +1,7 @@
+json2parquet/target/*
+generator/target/*
+processor/env/*
+processor/data-*
+*.zst
+
+
