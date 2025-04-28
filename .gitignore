@@ -3,5 +3,6 @@ generator/target/*
 processor/env/*
 processor/data-*
 *.zst
+full_summary.txt
 
 
