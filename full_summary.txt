@@ -1,0 +1,1305 @@
+- demo.sh
+#!/bin/bash
+
+cd processor/scripts
+
+./cycle.sh 5 200000
+
+./reset_files.sh
+
+- cycle.sh
+#!/bin/bash
+
+source ./toggle_env.sh
+
+START_TIME=$(date +%s)
+
+ITERATIONS=${1:-5} # Defaults to 5 if not specified
+COUNT=0
+
+while true; do
+  if [[ $ITERATIONS -ne 0 && $COUNT -ge $ITERATIONS ]]; then
+    echo "Reached $ITERATIONS iterations. Exiting."
+    break
+  fi
+
+  echo ""
+  echo "=== Iteration $((COUNT + 1)) ==="
+
+  if [[ -n $2 ]]; then
+    ./gen_data.sh $2
+  else 
+    ./gen_data.sh
+  fi
+
+  cd ..
+  if [[ -f "data.parquet" ]]; then
+    echo "Ingesting data..."
+    python3 ingest.py
+    echo "Done!"
+    echo "Normalizing data..."
+    python3 normalize.py
+    echo "Done!"
+    UUID=$(uuidgen)
+    mv data.parquet "data-$UUID.parquet"
+    echo "Data moved to 'data-$UUID.parquet'."
+  else
+    echo "No data.parquet found. Skipping..."
+  fi
+  cd scripts
+
+  ((COUNT++))
+done
+
+cd ..
+echo ""
+echo "Processing data..."
+python3 process.py
+
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+
+# Format elapsed time
+if [[ $ELAPSED -ge 60 ]]; then
+  MINUTES=$((ELAPSED / 60))
+  SECONDS=$((ELAPSED % 60))
+  TIME_MSG="${MINUTES}m ${SECONDS}s"
+else
+  TIME_MSG="${ELAPSED}s"
+fi
+
+ENTRIES_PER_ITER=${2:-2000000}
+
+echo ""
+echo "Finished $COUNT iteration(s) for $ENTRIES_PER_ITER entries each in $TIME_MSG."
+echo ""
+
+cd scripts
+source ./toggle_env.sh
+
+cd ..
+echo "Running sample queries..."
+duckdb orders.duckdb < sample.sql
+cd scripts
+
+- gen_data.sh
+#!/bin/bash
+
+cd ../../generator
+
+if [[ -n $1 ]]; then
+  ./generator $1 &
+else
+  ./generator &
+fi
+RUST_PS=$!
+
+cd ../processor/scripts
+
+echo "Generating data..."
+wait "$RUST_PS"
+echo "Done!"
+
+- reset_files.sh
+#!/bin/bash
+
+cd ..
+echo "Removing all 'data*.parquet*' files..."
+rm -f data*.parquet*
+echo "Removing 'orders.duckdb'..."
+rm -f orders.duckdb
+echo "Done!"
+cd scripts
+
+- toggle_env.sh
+#!/usr/bin/env bash
+
+# Change this to the path to your virtual environment
+cd ..
+CURRENT_DIR=$(pwd)
+VENV_PATH="$CURRENT_DIR/env"
+
+# Check if a virtual environment is currently active
+if [[ -n "$VIRTUAL_ENV" ]]; then
+    echo "Deactivating virtual environment: $VIRTUAL_ENV"
+    deactivate
+else
+    echo "Activating virtual environment: $VENV_PATH"
+    # shellcheck disable=SC1090
+    source "$VENV_PATH/bin/activate"
+fi
+cd scripts
+# ingest.py
+
+import os
+import duckdb as ddb
+
+
+def create_temp_table():
+    with ddb.connect("orders.duckdb") as con:
+        con.execute("CREATE TABLE incoming_orders AS (SELECT * FROM 'data.parquet')")
+
+
+if __name__ == "__main__":
+    if os.path.exists("data.parquet"):
+        create_temp_table()
+
+# normalize.py
+        
+import duckdb as ddb
+
+with ddb.connect("orders.duckdb") as con:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customers (
+            Id BIGINT,
+            Name VARCHAR,
+            Email VARCHAR,
+            Address VARCHAR,
+            Status VARCHAR
+        )
+    """
+    )
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS products (
+            Id BIGINT,
+            Name VARCHAR,
+            Category VARCHAR,
+            Price DOUBLE
+        )
+    """
+    )
+
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS orders (
+            Id VARCHAR,
+            CustomerId BIGINT,
+            ProductId BIGINT,
+            Date TIMESTAMP,
+            Payment VARCHAR,
+            Status VARCHAR,
+            Discount DOUBLE,
+            Quantity INTEGER,
+            Total DOUBLE
+        )
+    """
+    )
+
+    con.execute(
+        """
+        INSERT INTO customers
+        SELECT DISTINCT
+            Customer.Id AS Id,
+            Customer.Name AS Name,
+            Customer.Email AS Email,
+            Customer.Address AS Address,
+            Customer.Status AS Status
+        FROM incoming_orders
+        WHERE Customer.Id NOT IN (SELECT Id FROM customers);
+    """
+    )
+
+    con.execute(
+        """
+        INSERT INTO products
+        SELECT DISTINCT
+            Product.Id AS Id,
+            Product.Name AS Name,
+            Product.Category AS Category,
+            Product.Price AS Price
+        FROM incoming_orders
+        WHERE Product.Id NOT IN (SELECT Id FROM products);
+    """
+    )
+
+    con.execute(
+        """
+        INSERT INTO orders
+        SELECT
+            o.Id,
+            o.Customer.Id AS CustomerId,
+            o.Product.Id AS ProductId,
+            o.Date,
+            o.Payment,
+            o.Status,
+            o.Discount,
+            o.Quantity,
+            o.Total
+        FROM incoming_orders o;
+    """
+    )
+
+    con.execute("DROP TABLE IF EXISTS incoming_orders")
+
+# process.py
+
+
+import duckdb as ddb
+
+
+def save_customer_anomalies(con):
+    con.execute("DROP TABLE IF EXISTS customer_anomalies")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_anomalies AS
+        SELECT
+            o.CustomerId,
+            c.Name AS CustomerName,
+            COUNT(*) AS AnomalyCount
+        FROM order_anomalies o
+        JOIN customers c ON o.CustomerId = c.Id
+        WHERE o.CancelReason <> 'BadCard'
+        GROUP BY o.CustomerId, c.Name
+        ORDER BY AnomalyCount DESC;
+        """
+    )
+
+
+def save_product_return_rates(con):
+    con.execute("DROP TABLE IF EXISTS product_return_rates")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_return_rates AS
+        SELECT
+            o.ProductId,
+            p.Name AS ProductName,
+            COUNT(*) AS TotalOrders,
+            COUNT(*) FILTER (WHERE o.Status IN ('Cancelled', 'Refunded')) AS ReturnedOrders,
+            1.0 * COUNT(*) FILTER (WHERE o.Status IN ('Cancelled', 'Refunded')) / COUNT(*) AS ReturnRate
+        FROM orders o
+        JOIN products p ON o.ProductId = p.Id
+        GROUP BY o.ProductId, p.Name;
+        """
+    )
+
+
+def save_monthly_order_volume(con):
+    con.execute("DROP TABLE IF EXISTS monthly_order_volume")
+    con.execute(
+        """
+        CREATE TABLE monthly_order_volume AS
+        SELECT
+            DATE_TRUNC('month', CAST(Date AS TIMESTAMP)) AS Month,
+            COUNT(*) AS OrderCount
+        FROM orders
+        WHERE Status NOT IN ('Cancelled', 'Refunded')
+        GROUP BY 1;
+        """
+    )
+
+
+def save_top_customers(con):
+    con.execute("DROP TABLE IF EXISTS top_spenders")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS top_spenders AS
+        SELECT
+            o.CustomerId,
+            c.Name AS CustomerName,
+            SUM(o.Total) AS TotalSpent
+        FROM orders o
+        JOIN customers c ON o.CustomerId = c.Id
+        WHERE o.Status NOT IN ('Cancelled', 'Refunded')
+        GROUP BY o.CustomerId, c.Name
+        ORDER BY TotalSpent DESC
+        LIMIT 10;
+        """
+    )
+
+
+def save_anomalies(con):
+    con.execute("DROP TABLE IF EXISTS order_anomalies")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_anomalies AS
+        SELECT
+            *,
+            CASE 
+                WHEN LENGTH(Id) != 36 THEN 'BadId'
+                ELSE 'BadCard'
+            END AS CancelReason
+        FROM orders
+        WHERE Status = 'Cancelled';
+        """
+    )
+
+
+def save_most_popular_product(con):
+    con.execute("DROP TABLE IF EXISTS top_product")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS top_product AS
+        WITH product_counts AS (
+            SELECT
+                o.ProductId,
+                p.Name AS ProductName,
+                COUNT(*) AS Count
+            FROM orders o
+            JOIN products p ON o.ProductId = p.Id
+            WHERE o.Status NOT IN ('Cancelled', 'Refunded')
+            GROUP BY o.ProductId, p.Name
+        ),
+        max_count AS (
+            SELECT MAX(Count) AS MaxCount FROM product_counts
+        )
+        SELECT pc.*
+        FROM product_counts pc
+        JOIN max_count mc ON pc.Count = mc.MaxCount;
+        """
+    )
+
+
+with ddb.connect("orders.duckdb") as con:
+    print("Saving anomalies...")
+    save_anomalies(con)
+    print("Saving most popular products...")
+    save_most_popular_product(con)
+    print("Saving monthly order volume...")
+    save_monthly_order_volume(con)
+    print("Saving number of customer anomalies...")
+    save_customer_anomalies(con)
+    print("Saving product return rates...")
+    save_product_return_rates(con)
+    print("Saving top spending customers...")
+    save_top_customers(con)
+    print("Done! Your data is ready to view in 'orders.duckdb'!")
+
+-- sample.sql
+
+
+
+-- ==================================
+-- ===== Pipeline Output Snapshot =====
+-- ==================================
+
+-- 1. Overall Counts
+SELECT 'Total Customers' AS Metric, COUNT(*) AS Value FROM customers
+UNION ALL
+SELECT 'Total Products' AS Metric, COUNT(*) AS Value FROM products
+UNION ALL
+SELECT 'Total Orders' AS Metric, COUNT(*) AS Value FROM orders;
+
+-- 2. Top Spenders (Display Top 5)
+SELECT '--- Top 5 Spenders ---' AS Header; 
+SELECT CustomerName, TotalSpent
+FROM top_spenders
+ORDER BY TotalSpent DESC
+LIMIT 5;
+
+-- 3. Top Products (Display Top 5)
+SELECT '--- Top Selling Product(s) ---' AS Header;
+SELECT ProductName, Count AS OrdersCount
+FROM top_product
+ORDER BY Count DESC;
+
+-- 4. Highest Return Rates (Display Top 5)
+SELECT '--- Top 5 Product Return Rates ---' AS Header; 
+SELECT ProductName, printf('%.2f%%', ReturnRate * 100) AS ReturnRatePercentage
+FROM product_return_rates
+WHERE ReturnRate IS NOT NULL -- Avoid NULLs if a product had 0 orders
+ORDER BY ReturnRate DESC
+LIMIT 5;
+
+-- 5. Monthly Order Volume 
+SELECT '--- Monthly Order Volume ---' AS Header; 
+SELECT strftime(Month, '%Y-%m') AS OrderMonth, OrderCount
+FROM monthly_order_volume
+ORDER BY Month DESC
+LIMIT 6;
+
+-- 6. Anomaly Summary
+SELECT 'Total Anomalous Orders' AS Metric, COUNT(*) AS Separator FROM order_anomalies;
+
+-- 7. Anomalous Customers (Display up to 5)
+SELECT '--- Anomalous Customers ---' AS Header; 
+SELECT CustomerName, AnomalyCount
+FROM customer_anomalies
+ORDER BY AnomalyCount DESC
+LIMIT 5;
+
+-- 8. Anomalous Orders (Display up to 5)
+SELECT '--- Anomalous Orders ---' AS Header;  
+SELECT Id, CustomerId, ProductId, Status, CancelReason -- Select key fields
+FROM order_anomalies
+LIMIT 5;
+
+-- 9. Recent Orders (Display up to 5)
+SELECT '--- Recent Orders ---' AS Header; 
+SELECT Id, CustomerId, ProductId, Date, Total -- Select key fields
+FROM orders
+ORDER BY Date DESC
+LIMIT 5;
+
+-- ==================================
+-- ========= End of Snapshot =========
+-- ==================================
+// customers.rs
+use rand::Rng;
+use serde::Serialize;
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[allow(dead_code)]
+pub enum CustomerStatus {
+    NewCustomer,
+    ReturningCustomer,
+    RewardsMember,
+    Employee,
+    Manager,
+    Owner,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Customer {
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+    pub address: String,
+    pub status: CustomerStatus,
+}
+
+pub fn generate_customer() -> Customer {
+    let name = get_name();
+    return Customer {
+        id: get_customer_id(&name),
+        name: name.clone(),
+        email: get_email(&name),
+        address: get_address(&name),
+        status: get_status(&name),
+    };
+}
+
+// ------------------------ Data + Logic ------------------------
+
+fn get_name() -> String {
+    let names = NAMES;
+    let mut rng = rand::rng();
+
+    let mut choice: usize = rng.random_range(0..25);
+    if rng.random_range(0..5) == 0 {
+        // 20% chance to shift index
+        choice = choice.saturating_sub(rng.random_range(0..10));
+    }
+    return names[choice].to_string();
+}
+
+fn get_customer_id(name: &str) -> i64 {
+    return {
+        CUSTOMER_IDS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, id)| *id).unwrap_or(-1)
+    };
+}
+
+fn get_email(name: &str) -> String {
+    return {
+        CUSTOMER_EMAILS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .to_string()
+    };
+}
+
+fn get_address(name: &str) -> String {
+    return {
+        CUSTOMER_ADDRESSES
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .to_string()
+    };
+}
+
+fn get_status(name: &str) -> CustomerStatus {
+    return match name {
+        "Maya Ellison" | "Noah Blackwood" | "Chloe Hartman" |
+        "Lucas Pennington" | "Sofia Langford" | "Oliver Drayton" |
+        "Harper Linwood" => {
+            CustomerStatus::ReturningCustomer
+        },
+        "Sebastian Knox" | "Amelia Fairbanks" | "Julian Royce" |
+        "Nora Halston" | "Elijah Trent" | "Zoe Merrick" => {
+            CustomerStatus::RewardsMember
+        },
+        "Caleb Winslow" | "Lily Hargrove" | "Milo Carrington" |
+        "Aria Templeton" | "Declan Shore" => {
+            CustomerStatus::Employee
+        },
+        "Vivian Leclair" | "Grayson Holt" => {
+            CustomerStatus::Manager
+        },
+        "Clara Redmond" => {
+            CustomerStatus::Owner
+        },
+        _ =>CustomerStatus::NewCustomer,
+    };
+}
+
+// ------------------------ Static Data ------------------------
+
+const NAMES: [&str; 25] = [
+    "Ava Whitaker", "Liam Caldwell", "Isabella Greene", "Ethan Morrell",
+    "Maya Ellison", "Noah Blackwood", "Chloe Hartman", "Lucas Pennington",
+    "Sofia Langford", "Oliver Drayton", "Harper Linwood", "Sebastian Knox",
+    "Amelia Fairbanks", "Julian Royce", "Nora Halston", "Elijah Trent",
+    "Zoe Merrick", "Caleb Winslow", "Lily Hargrove", "Milo Carrington",
+    "Aria Templeton", "Declan Shore", "Vivian Leclair", "Grayson Holt",
+    "Clara Redmond"
+];
+
+const CUSTOMER_IDS: [(&str, i64); 25] = [
+    ("Ava Whitaker", 24), ("Liam Caldwell", 23), ("Isabella Greene", 22), ("Ethan Morrell", 21),
+    ("Maya Ellison", 20), ("Noah Blackwood", 19), ("Chloe Hartman", 18), ("Lucas Pennington", 17),
+    ("Sofia Langford", 16), ("Oliver Drayton", 15), ("Harper Linwood", 14), ("Sebastian Knox", 13),
+    ("Amelia Fairbanks", 12), ("Julian Royce", 11), ("Nora Halston", 10), ("Elijah Trent", 9),
+    ("Zoe Merrick", 8), ("Caleb Winslow", 7), ("Lily Hargrove", 6), ("Milo Carrington", 5),
+    ("Aria Templeton", 4), ("Declan Shore", 3), ("Vivian Leclair", 2), ("Grayson Holt", 1),
+    ("Clara Redmond", 0),
+];
+
+const CUSTOMER_EMAILS: [(&str, &str); 25] = [
+    ("Ava Whitaker", "whitaker.a@email.com"),
+    ("Liam Caldwell", "caldwelll@email.com"),
+    ("Isabella Greene", "isabella_greene@email.com"),
+    ("Ethan Morrell", "morrelle@email.com"),
+    ("Maya Ellison", "ellison_maya@email.com"),
+    ("Noah Blackwood", "blackwood3noah@email.com"),
+    ("Chloe Hartman", "chloehartman54321@emailprovider.com"),
+    ("Lucas Pennington", "lucky_penny10@upmail.com"),
+    ("Sofia Langford", "sofie_lang123@email.com"),
+    ("Oliver Drayton", "drayton.o@email.com"),
+    ("Harper Linwood", "harper.lindwood@downmail.com"),
+    ("Sebastian Knox", "sebknox@email.com"),
+    ("Amelia Fairbanks", "the_fairest_of_banks@email.com"),
+    ("Julian Royce", "royce_j@email.com"),
+    ("Nora Halston", "halston.n@emailprovider.com"),
+    ("Elijah Trent", "eli_trent123@upmail.com"),
+    ("Zoe Merrick", "zoe.merrick@email.com"),
+    ("Caleb Winslow", "employee1@store.com"),
+    ("Lily Hargrove", "employee2@store.com"),
+    ("Milo Carrington", "employee3@store.com"),
+    ("Aria Templeton", "employee4@store.com"),
+    ("Declan Shore", "employee5@store.com"),
+    ("Vivian Leclair", "manager1@store.com"),
+    ("Grayson Holt", "manager2@store.com"),
+    ("Clara Redmond", "owner@store.com"),
+];
+
+const CUSTOMER_ADDRESSES: [(&str, &str); 25] = [
+    ("Ava Whitaker", "1281 Marigold Ln, Boulder, CO 80304"),
+    ("Liam Caldwell", "760 Pine Hollow Rd, Albany, NY 12205"),
+    ("Isabella Greene", "3947 Sycamore Dr, San Diego, CA 92103"),
+    ("Ethan Morrell", "2420 Ridgeway Ave, Memphis, TN 38104"),
+    ("Maya Ellison", "87 Hilltop Cir, Eugene, OR 97405"),
+    ("Noah Blackwood", "511 Wren St, Madison, WI 53703"),
+    ("Chloe Hartman", "19 Cypress View Ct, Tampa, FL 33629"),
+    ("Lucas Pennington", "933 Windmere Way, Austin, TX 78731"),
+    ("Sofia Langford", "1604 Meadowlark Ln, Salt Lake City, UT 84106"),
+    ("Oliver Drayton", "43 Hollow Creek Rd, Durham, NC 27707"),
+    ("Harper Linwood", "670 Bramblewood Dr, Indianapolis, IN 46220"),
+    ("Sebastian Knox", "3582 Auburn Ridge Ct, Scottsdale, AZ 85251"),
+    ("Amelia Fairbanks", "1047 Birch Haven Dr, Minneapolis, MN 55406"),
+    ("Julian Royce", "213 Ivy Brook Ln, Charleston, SC 29414"),
+    ("Nora Halston", "585 Oak Crest Blvd, Des Moines, IA 50310"),
+    ("Elijah Trent", "402 Clearwater Ct, Kansas City, MO 64111"),
+    ("Zoe Merrick", "144 Harborstone Dr, Anchorage, AK 99501"),
+    ("Caleb Winslow", "318 Willow Bend Dr, Raleigh, NC 27609"),
+    ("Lily Hargrove", "4902 Maple Grove Ln, Cary, NC 27513"),
+    ("Milo Carrington", "1023 Briarcliff Cir, Durham, NC 27705"),
+    ("Aria Templeton", "710 Pine Ridge Dr, Chapel Hill, NC 27514"),
+    ("Declan Shore", "855 Brookview Rd, Raleigh, NC 27606"),
+    ("Vivian Leclair", "6307 Oakdale Way, Apex, NC 27502"),
+    ("Grayson Holt", "214 Forest Glen Ct, Garner, NC 27529"),
+    ("Clara Redmond", "1201 Amberwood Dr, Holly Springs, NC 27540"),
+];
+
+// main.rs
+use std::env;
+
+use rayon::prelude::*;
+use crate::orders::generate_order;
+
+mod customers;
+mod payments;
+mod products;
+mod utils;
+mod orders;
+mod writer;
+
+fn main() {
+    // ----------------------- Parse input arg -----------------------
+    let args: Vec<String> = env::args().collect();
+    let num_orders: usize = if args.len() > 1 {
+        args[1].parse().unwrap_or_else(|_| {
+            eprintln!("Non-numeric argument passed for number of orders.");
+            std::process::exit(1);
+        })
+    } 
+    else { 2_000_000 };
+
+    // ----------------------- Generate in parallel -----------------------
+    println!("Generating {num_orders} orders...");
+    let orders: Vec<orders::Order> = {
+        (0..num_orders)
+    	    .into_par_iter()
+    	    .map(|_| generate_order())
+    	    .collect()
+	};
+
+    // ----------------------- Write to file -----------------------
+    let path = "../processor/data.parquet";
+	if let Err(err) = writer::write_parquet(&orders, path) {
+	    eprintln!("Failed to write Parquet file: {err}");
+	}
+	else {
+		return println!("Data generated successfully!");
+	}
+}
+
+// orders.rs
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use std::fmt;
+
+use crate::customers::{self, Customer, CustomerStatus};
+use crate::payments::{self, Payment};
+use crate::products::{self, Product};
+use crate::utils::{generate_datetime, generate_uuid, round_decimal};
+use rand::Rng;
+
+#[derive(Debug, Serialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderStatus {
+    Pending,
+    Completed,
+    Refunded,
+    Cancelled,
+}
+
+impl fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            OrderStatus::Pending => "Pending",
+            OrderStatus::Completed => "Completed",
+            OrderStatus::Refunded => "Refunded",
+            OrderStatus::Cancelled => "Cancelled",
+        };
+        return write!(f, "{}", s);
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Order {
+    pub id: String,
+    pub customer: Customer,
+    pub product: Product,
+    pub date: DateTime<Utc>,
+    pub payment: Payment,
+    pub status: OrderStatus,
+    pub discount: f64,
+    pub quantity: u32,
+    pub total: f64,
+}
+
+// --------------------------------------------
+
+fn get_status(id: &str, payment: &Payment, date: DateTime<Utc>) -> OrderStatus {
+    if id.len() != 36 {
+        return OrderStatus::Cancelled;
+    }
+    let now = Utc::now();
+    if now.date_naive() > payment.details.expiration_date() {
+        return OrderStatus::Cancelled;
+    }
+    let month_ago = now - chrono::Duration::days(30);
+    let week_ago = now - chrono::Duration::days(7);
+    if date < month_ago { OrderStatus::Completed } 
+    else if date > month_ago && date < week_ago { OrderStatus::Refunded } 
+    else if date > week_ago && date <= now { OrderStatus::Completed } 
+    else if date > now { OrderStatus::Pending } 
+    else { OrderStatus::Completed }
+}
+
+fn get_quantity() -> u32 {
+    let mut rng = rand::rng();
+    let temp = {
+        rng.random_range(0..3) + 
+        rng.random_range(0..2) - 
+        rng.random_range(0..4) + 
+        rng.random_range(0..1)
+    };
+    if temp > 0 { temp as u32 } 
+    else { rng.random_range(1..=2) }
+}
+
+fn get_discount(customer: &Customer) -> f64 {
+    let mut rng = rand::rng();
+    match customer.status {
+        CustomerStatus::NewCustomer => 0.05,
+        CustomerStatus::ReturningCustomer => {
+            if rng.random_range(0..6) % 2 != 0 { return 0.03; } 
+            else { return 0.0; }
+        }
+        CustomerStatus::RewardsMember => 0.10,
+        CustomerStatus::Employee => 0.20,
+        CustomerStatus::Manager => 0.50,
+        CustomerStatus::Owner => 1.00,
+    }
+}
+
+fn compute_total(order: &mut Order) {
+    let raw = order.product.price * order.quantity as f64;
+    let discounted = raw * (1.0 - order.discount);
+    order.total = round_decimal(discounted);
+}
+
+// --------------------------------------------
+
+pub fn generate_order() -> Order {
+    let mut id = generate_uuid();
+    let date = generate_datetime();
+    let product = products::generate_product();
+    let customer = customers::generate_customer();
+    let payment = payments::new_payment(&customer.name);
+    if rand::rng().random_range(0..1000) % 13 == 0 {
+        id.push('0'); // corrupt it slightly
+    }
+    let mut order = Order {
+        id: id.clone(),
+        date,
+        customer,
+        product,
+        status: get_status(&id, &payment, date),
+        payment,
+        discount: 0.0, // filled in below
+        quantity: get_quantity(),
+        total: 0.0,
+    };
+    order.discount = get_discount(&order.customer);
+    compute_total(&mut order);
+    return order;
+}
+
+#[allow(dead_code)]
+pub fn show(order: &Order) {
+    use std::thread;
+    use std::time::Duration;
+
+    println!("start~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~start");
+    println!("Order Details:");
+    println!(
+        "Order ID: {}\nDate: {}\nStatus: {}\nDiscount: {:.2}\nQuantity: {}\nTotal: {:.2}\n",
+        order.id, order.date, order.status, order.discount, order.quantity, order.total
+    );
+    println!("Customer Details:");
+    println!(
+        "Customer Id: {}\nName: {}\nEmail: {}\nAddress: {}\nStatus: {:?}\n",
+        order.customer.id,
+        order.customer.name,
+        order.customer.email,
+        order.customer.address,
+        order.customer.status,
+    );
+    println!("Payment Details:");
+    println!(
+        "Transaction ID: {}\nExpiration Date: {}\n",
+        order.payment.transaction_id,
+        order.payment.details.expiration_date()
+    );
+    println!("Product Details:");
+    println!(
+        "Product Id: {}\nName: {}\nCategory: {}\nPrice: {:.2}\n",
+        order.product.id,
+        order.product.name,
+        order.product.category,
+        order.product.price
+    );
+    println!("end~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~end");
+    thread::sleep(Duration::from_millis(10));
+}
+
+// payments.rs
+use crate::utils::generate_uuid;
+use chrono::NaiveDate;
+use rand::Rng;
+use serde::Serialize;
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CardDetails {
+    pub number: String,
+    pub expiration: NaiveDate,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Wallet {
+    pub expiration: NaiveDate,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PaymentDetails {
+    Card(CardDetails),
+    Wallet(Wallet),
+}
+
+impl PaymentDetails {
+    pub fn expiration_date(&self) -> NaiveDate {
+        return match self {
+            PaymentDetails::Card(card) => card.expiration,
+            PaymentDetails::Wallet(wallet) => wallet.expiration,
+        };
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Payment {
+    pub details: PaymentDetails,
+    pub transaction_id: String,
+}
+
+fn parse_exp_date(exp_str: &str) -> NaiveDate {
+    let parts: Vec<u32> = {
+        exp_str
+            .split('/')
+            .map(|s| s.parse().unwrap_or(1))
+            .collect()
+    };
+    let (month, year_suffix) = (parts[0], parts[1]);
+    let year = 2000 + year_suffix as i32;
+
+    let first_of_next_month = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap()
+    } 
+    else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1).unwrap()
+    };
+    return first_of_next_month.pred_opt().unwrap();
+}
+
+fn get_card_list() -> Vec<CardDetails> {
+    return vec![
+        ("************5171", "05/25"), ("************7690", "05/27"),
+        ("************2763", "06/24"), ("************3315", "04/26"),
+        ("************4072", "01/28"), ("************6869", "11/25"),
+        ("************2781", "08/26"), ("************0904", "09/25"),
+        ("************4469", "09/27"), ("************5164", "08/26"),
+        ("************3341", "04/25"), ("************1349", "07/26"),
+        ("************4167", "03/25"), ("************7168", "09/25"),
+        ("************8239", "10/26"), ("************0932", "11/26"),
+        ("************8186", "08/27"), ("************7668", "11/25"),
+        ("************9486", "09/27"), ("************1093", "02/27"),
+        ("************0238", "01/26"), ("************9611", "02/28"),
+        ("************7295", "09/26"), ("************8346", "08/27"),
+        ("************2464", "01/26"),
+    ].into_iter().map(|(n, d)| CardDetails {
+        number: n.to_string(),
+        expiration: parse_exp_date(d),
+    })
+    .collect();
+}
+
+fn get_wallet_list() -> Vec<Wallet> {
+    return {
+        get_card_list()
+            .iter()
+            .map(|card| Wallet { expiration: card.expiration })
+            .collect()
+    };
+}
+
+pub fn choose_payment_method(name: &str) -> PaymentDetails {
+    let cards = get_card_list();
+    let wallets = get_wallet_list();
+    let name_to_index = [
+        "Ava Whitaker", "Liam Caldwell", "Isabella Greene", "Ethan Morrell",
+        "Maya Ellison", "Noah Blackwood", "Chloe Hartman", "Lucas Pennington",
+        "Sofia Langford", "Oliver Drayton", "Harper Linwood", "Sebastian Knox",
+        "Amelia Fairbanks", "Julian Royce", "Nora Halston", "Elijah Trent",
+        "Zoe Merrick", "Caleb Winslow", "Lily Hargrove", "Milo Carrington",
+        "Aria Templeton", "Declan Shore", "Vivian Leclair", "Grayson Holt",
+        "Clara Redmond",
+    ];
+    if let Some(index) = name_to_index.iter().position(|n| *n == name) {
+        let mut rng = rand::rng();
+        if rng.random_bool(0.5) { PaymentDetails::Card(cards[index].clone()) } 
+        else { PaymentDetails::Wallet(wallets[index].clone()) }
+    } 
+    else { panic!("Unknown customer name: {name}"); }
+}
+
+pub fn new_payment(name: &str) -> Payment {
+    return Payment {
+        details: choose_payment_method(name),
+        transaction_id: generate_uuid(),
+    };
+}
+
+// products.rs
+use rand::Rng;
+use serde::Serialize;
+
+use crate::utils::round_decimal;
+
+#[derive(Debug, Serialize, Clone, Copy)]
+pub enum ProductCategory {
+    Grocery,
+    HealthAndWellness,
+    CleaningSupplies,
+    PetSupplies,
+    OfficeSupplies,
+    ToysAndGames,
+    SeasonalItems,
+    Clothing,
+    Electronics,
+    Furniture,
+    Kitchenware,
+    Lighting,
+    BeddingAndBath,
+    Tools,
+    OutdoorEquipment,
+    Automotive,
+}
+
+impl std::fmt::Display for ProductCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ProductCategory::Grocery => "Grocery",
+            ProductCategory::HealthAndWellness => "Health and Wellness",
+            ProductCategory::CleaningSupplies => "Cleaning Supplies",
+            ProductCategory::PetSupplies => "Pet Supplies",
+            ProductCategory::OfficeSupplies => "Office Supplies",
+            ProductCategory::ToysAndGames => "Toys and Games",
+            ProductCategory::SeasonalItems => "Seasonal Items",
+            ProductCategory::Clothing => "Clothing",
+            ProductCategory::Electronics => "Electronics",
+            ProductCategory::Furniture => "Furniture",
+            ProductCategory::Kitchenware => "Kitchenware",
+            ProductCategory::Lighting => "Lighting",
+            ProductCategory::BeddingAndBath => "Bedding and Bath",
+            ProductCategory::Tools => "Tools",
+            ProductCategory::OutdoorEquipment => "Outdoor Equipment",
+            ProductCategory::Automotive => "Automotive",
+        };
+        return write!(f, "{}", name);
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Product {
+    pub id: i64,
+    pub name: String,
+    pub category: ProductCategory,
+    pub price: f64,
+}
+
+pub fn generate_product() -> Product {
+    let id = rand::rng().random_range(0..50);
+    return Product {
+        id,
+        name: get_name(id),
+        category: get_category(id),
+        price: round_decimal(get_price(id)),
+    };
+}
+
+fn get_name(id: i64) -> String {
+    return PRODUCT_IDS[id as usize].to_string();
+}
+
+fn get_category(id: i64) -> ProductCategory {
+    return match id {
+        0..=3 => ProductCategory::Grocery,
+        4..=7 => ProductCategory::HealthAndWellness,
+        8..=10 => ProductCategory::CleaningSupplies,
+        11..=13 => ProductCategory::PetSupplies,
+        14..=16 => ProductCategory::OfficeSupplies,
+        17..=19 => ProductCategory::ToysAndGames,
+        20..=22 => ProductCategory::SeasonalItems,
+        23..=25 => ProductCategory::Clothing,
+        26..=28 => ProductCategory::Electronics,
+        29..=31 => ProductCategory::Furniture,
+        32..=34 => ProductCategory::Kitchenware,
+        35..=37 => ProductCategory::Lighting,
+        38..=40 => ProductCategory::BeddingAndBath,
+        41..=43 => ProductCategory::Tools,
+        44..=46 => ProductCategory::OutdoorEquipment,
+        47..=49 => ProductCategory::Automotive,
+        _ => panic!("Invalid product ID"),
+    };
+}
+
+fn get_price(id: i64) -> f64 {
+    return PRODUCT_PRICES[id as usize];
+}
+
+const PRODUCT_IDS: [&str; 50] = [
+    "Whole Wheat Bread", "Whole Milk (1 Gallon)", "Canned Black Beans", "White Rice (2 lb bag)",
+    "Ibuprofen (200mg, 100ct)", "Multivitamins (Adult)", "Hand Sanitizer (12oz)", "Digital Thermometer",
+    "All-Purpose Cleaner", "Dishwashing Liquid (32oz)", "Disinfecting Wipes (70ct)",
+    "Dry Dog Food (15lb)", "Cat Litter (25lb)", "Pet Shampoo",
+    "Ballpoint pen (10-pack)", "Spiral Notebook (college ruled)", "Inkjet Printer Ink Cartridge (color)",
+    "Building Blocks Set", "Puzzle (1000 pieces)", "Action Figure",
+    "LED Christmas Lights (100ct)", "Halloween Pumpkin Carving Kit", "Summer Beach Towel",
+    "Men's Graphic T-Shirt", "Women's Yoga Pants", "Children's Raincoat",
+    "Wireless Bluetooth Speaker", "USB-C Charging Cable", "Noise-Canceling Headphones",
+    "4-Tier Bookshelf", "Accent Chair -- Wicker", "Folding Dining Table",
+    "Non-stick Frying Pan (10\")", "Stainless Steel Mixing Bowls (3-pack)", "Chef's Knife (8\")",
+    "LED Floor Lamp", "Smart Light Bulbs (4-pack)", "Motion Sensor Night Light",
+    "Queen Comforter Set", "Bath Towel Set (6-piece)", "Memory Foam Pillow",
+    "Cordless Power Drill (18V)", "Adjustable Wrench Set", "Tape Measure (25ft)",
+    "Charcoal Grill", "Garden Hose (50ft)", "Outdoor Solar Path Lights (6-pack)",
+    "Motor Oil (5W-30, 5qt)", "Windshield Wipers (front pair)", "Car Air Freshener -- Pine Scent",
+];
+
+const PRODUCT_PRICES: [f64; 50] = [
+    3.99, 3.49, 0.89, 2.99, 3.99, 9.99, 3.00, 14.99, 4.99, 3.99,
+    5.49, 30.00, 17.49, 12.99, 5.00, 3.49, 21.99, 16.79, 18.99, 9.89,
+    14.99, 21.19, 10.00, 14.00, 29.99, 28.00, 149.99, 5.99, 349.99, 77.99,
+    259.00, 189.99, 33.49, 39.99, 79.99, 90.00, 59.99, 9.99, 69.99, 44.99,
+    35.00, 89.99, 29.99, 9.99, 119.99, 29.99, 45.00, 14.29, 23.49, 2.59,
+];
+
+// utils.rs
+use uuid::Uuid;
+use chrono::{DateTime, Duration, Utc, Datelike, TimeZone};
+use rand::Rng;
+use rand::rng;
+
+pub fn generate_uuid() -> String {
+    return Uuid::new_v4().to_string();
+}
+
+pub fn generate_datetime() -> DateTime<Utc> {
+    let now = Utc::now();
+    let current_year = now.date_naive().year();
+    let start = {
+        Utc.with_ymd_and_hms(current_year, 1, 1, 0, 0, 0)
+            .single()
+            .expect("Invalid date")
+    };
+    let end = now + Duration::days(7);
+    let seconds_range = end.timestamp() - start.timestamp();
+    let mut rng = rng();
+    let random_seconds = rng.random_range(0..seconds_range);
+    return start + Duration::seconds(random_seconds);
+}
+
+pub fn round_decimal(val: f64) -> f64 {
+    return (val * 100.0).round() / 100.0;
+}
+
+// writer.rs
+use arrow2::array::*;
+use std::fs::File;
+use std::sync::Arc;
+use std::io::BufWriter;
+use arrow2::chunk::Chunk;
+use arrow2::datatypes::*;
+use arrow2::io::parquet::write::*;
+use arrow2::io::parquet::write::to_parquet_leaves;
+use arrow2::io::parquet::write::CompressionOptions;
+use arrow2::array::{Array, Int64Array, StructArray, Utf8Array};
+use arrow2::datatypes::{DataType, Field};
+
+use crate::orders::Order;
+
+/// Convert a list of orders into an Arrow Chunk (table-like columnar batch)
+pub fn orders_to_chunk(orders: &[Order]) -> Chunk<Arc<dyn Array>> {
+    let id_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.id.as_str()).collect::<Vec<_>>());
+    let customer_array = get_customer_array(orders);
+    let product_array = get_product_array(orders);
+    let payment_array = get_payment_array(orders);
+    let discount_array = Float64Array::from_iter(orders.iter().map(|o| Some(o.discount)));
+    let quantity_array = UInt32Array::from_iter(orders.iter().map(|o| Some(o.quantity)));
+    let total_array = Float64Array::from_iter(orders.iter().map(|o| Some(o.total)));
+    let date_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| o.date.to_rfc3339()).collect::<Vec<_>>());
+    let status_array = Utf8Array::<i32>::from_slice(orders.iter().map(|o| format!("{:?}", o.status)).collect::<Vec<_>>());
+
+    return Chunk::new(vec![
+        Arc::new(id_array),
+        customer_array,
+        product_array,
+        payment_array,
+        Arc::new(discount_array),
+        Arc::new(quantity_array),
+        Arc::new(total_array),
+        Arc::new(date_array),
+        Arc::new(status_array),
+    ]);
+}
+
+pub fn get_payment_array(orders: &[Order]) -> Arc<dyn Array> {
+    let transaction_id_array = Utf8Array::<i32>::from_slice(
+        orders
+            .iter()
+            .map(|o| o.payment.transaction_id.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let expiration_array = Utf8Array::<i32>::from_slice(
+        orders
+            .iter()
+            .map(|o| o.payment.details.expiration_date().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let struct_array = StructArray::new(
+        DataType::Struct(vec![
+            Field::new("transaction_id", DataType::Utf8, false),
+            Field::new("expiration", DataType::Utf8, false),
+        ]),
+        vec![
+            Box::new(transaction_id_array) as Box<dyn Array>,
+            Box::new(expiration_array),
+        ],
+        None,
+    );
+    return Arc::new(struct_array);
+}
+
+pub fn get_product_array(orders: &[Order]) -> Arc<dyn Array> {
+    let product_id_array = Int64Array::from_slice(
+        orders.iter().map(|o| o.product.id).collect::<Vec<_>>(),
+    );
+    let product_name_array = Utf8Array::<i32>::from_slice(
+        orders.iter().map(|o| o.product.name.as_str()).collect::<Vec<_>>(),
+    );
+    let product_category_array = Utf8Array::<i32>::from_slice(
+        orders.iter().map(|o| format!("{}", o.product.category)).collect::<Vec<_>>(),
+    );
+    let product_price_array = Float64Array::from_iter(
+        orders.iter().map(|o| Some(o.product.price)),
+    );
+    let struct_array = StructArray::new(
+        DataType::Struct(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("category", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]),
+        vec![
+            Box::new(product_id_array) as Box<dyn Array>,
+            Box::new(product_name_array),
+            Box::new(product_category_array),
+            Box::new(product_price_array),
+        ],
+        None,
+    );
+    return Arc::new(struct_array);
+}
+
+pub fn get_customer_array(orders: &[Order]) -> Arc<dyn Array> {
+    let customer_id_array = {
+        Int64Array::from_slice(
+            orders.iter().map(|o| o.customer.id).collect::<Vec<_>>()
+        )
+    };
+    let customer_name_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.name.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_email_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.email.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_address_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| o.customer.address.as_str()).collect::<Vec<_>>()
+        )
+    };
+    let customer_status_array = {
+        Utf8Array::<i32>::from_slice(
+            orders.iter().map(|o| format!("{:?}", o.customer.status)).collect::<Vec<_>>()
+        )
+    };
+    let customer_array = StructArray::new(
+        DataType::Struct(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("email", DataType::Utf8, false),
+            Field::new("address", DataType::Utf8, false),
+            Field::new("status", DataType::Utf8, false),
+        ]),
+        vec![
+            Box::new(customer_id_array),
+            Box::new(customer_name_array),
+            Box::new(customer_email_array),
+            Box::new(customer_address_array),
+            Box::new(customer_status_array),
+        ],
+        None,
+    );
+    return Arc::new(customer_array);
+}
+
+pub fn get_order_schema() -> Schema {
+    return Schema::from(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("customer", DataType::Struct(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("email", DataType::Utf8, false),
+            Field::new("address", DataType::Utf8, false),
+            Field::new("status", DataType::Utf8, false),
+        ]), false),
+        Field::new("product", DataType::Struct(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, false),
+            Field::new("category", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]), false),
+        Field::new("payment", DataType::Struct(vec![
+            Field::new("transaction_id", DataType::Utf8, false),
+            Field::new("expiration", DataType::Utf8, false),
+        ]), false),
+        Field::new("discount", DataType::Float64, true),
+        Field::new("quantity", DataType::UInt32, false),
+        Field::new("total", DataType::Float64, false),
+        Field::new("date", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+    ]);
+}
+
+pub fn write_parquet(orders: &[Order], output_path: &str) -> arrow2::error::Result<()> {
+    let schema = get_order_schema();
+    let chunk = orders_to_chunk(orders);
+    let options = WriteOptions {
+        write_statistics: true,
+        compression: CompressionOptions::Zstd(Some(ZstdLevel::try_new(3).unwrap())),
+        version: Version::V2,
+        data_pagesize_limit: None,
+    };
+    let encodings: Vec<Vec<Encoding>> = {
+        schema
+            .fields
+            .iter()
+            .map(|field| {
+                let parquet_type = to_parquet_type(field).unwrap();
+                let leaf_count = to_parquet_leaves(parquet_type).len();
+                vec![Encoding::Plain; leaf_count]
+            })
+            .collect()
+    };
+    let mut row_groups = RowGroupIterator::try_new(
+        std::iter::once(Ok(chunk)),
+        &schema,
+        options,
+        encodings,
+    )?;
+    let file = File::create(output_path)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), schema, options)?;
+    for group in &mut row_groups {
+        writer.write(group?)?;
+    }
+    writer.end(None)?;
+    return Ok(());
+}
+

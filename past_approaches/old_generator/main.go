@@ -53,7 +53,7 @@ func main() {
 	}
 	wg.Wait()
 	ordersStr := strings.Join(ordersList, "\n")
-	file, err := os.Create("../processor/data.json")
+	file, err := os.Create("./data.json")
 	if err != nil {
 		fmt.Println("Unable to open file:", err)
 		os.Exit(1)

@@ -4,7 +4,7 @@ source ./toggle_env.sh
 
 START_TIME=$(date +%s)
 
-ITERATIONS=${1:-5} # Defaults to 5 if not specified
+ITERATIONS=${1:-3} # Defaults to 5 if not specified
 COUNT=0
 
 while true; do

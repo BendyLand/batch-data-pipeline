@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "Usage: source toggle_env.sh"
+    return 1 2>/dev/null || exit 1
+fi
+
 # Change this to the path to your virtual environment
 cd ..
 CURRENT_DIR=$(pwd)
